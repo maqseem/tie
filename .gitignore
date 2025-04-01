@@ -1,0 +1,6 @@
+__pychache__/ 
+*.pyc 
+venv/
+.DS_STORE
+tie.egg-info
+build/
