@@ -9,5 +9,5 @@ description = "Lightweight internationalization library for Python"
 authors = [{name = "Maksim Panov", email = "panovo@essent.space"}]
 license = { text = "MIT" }
 requires-python = ">=3.8"
-dependencies = ["pyyaml", "babel>=2.12.1", "packaging"]
+dependencies = ["pyyaml", "babel>=2.12.1", "packaging", "typing_extensions"]
 

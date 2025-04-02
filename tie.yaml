@@ -1,0 +1,17 @@
+tie:
+  version: 0.1.0
+  default_locale: en
+  format_numbers: yes
+
+greeting:
+  wrap: "{}!"
+  en: "Hello"
+  ru: "Привет"
+  la: "Salve{count|te}"
+  es: "Hola"
+
+@notifications:
+  liked_post:
+    first:
+      en: "Your post was liked by {count} {<person|people}!"
+

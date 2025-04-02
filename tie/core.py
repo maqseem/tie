@@ -1,5 +1,6 @@
 from packaging.version import Version
-from typing import Optional, Self
+from typing import Optional
+from typing_extensions import Self
 from yaml import SafeLoader
 from os import PathLike
 
@@ -12,7 +13,14 @@ class VersionError(Exception):
         Exception.__init__(self, msg)
 
 class Tie:
-    def __init__(self, path: FileDescriptorOrPath, lc: Optional[str] = None):
+    def __init__(self, 
+                 path: FileDescriptorOrPath, 
+                 default_locale: Optional[str] = None):
+        """Initializes a new Tie instance.
+        
+        Raises:
+            VersionError: if the library version is less than specified in yaml file.
+        """
         with open(path, "r") as file:
             dom = SafeLoader(file).get_data()
         
@@ -20,12 +28,29 @@ class Tie:
         dom.pop("tie", None)
 
         self.dom = dom
-        self.default_lc = lc or config.get("default_locale", "en")
-        self.locale = lc or self.default_lc
+        self.default_locale = default_locale or config.get("default_locale", "en")
+
         self.version = config.get("version", TIE_VERSION)
         if Version(self.version) > Version(TIE_VERSION):
             raise VersionError(f"The Tie library version is less than required: {TIE_VERSION} < {self.version}")
-    
-    def _lc(self, lc: str) -> Self:
-        self.lc = lc
+
+    # def __getattr__(self, attr: str, /) -> Self:
+    #     content = self.dom[attr]
+    #     if attr.startswith("@"):
+    #         self.dom = content
+    #     return self
+
+    def _lc(self, locale: Optional[str], /) -> Self:
+        """
+        This function changes the locale.
+
+        Args:
+           locale (Optional[str]): the locale being set. If not assigned, the default_locale is used. 
+
+        Returns:
+            Self: new Tie instance with assigned locale.
+        """
+        self.locale = locale or self.default_locale
         return self
+
+print(Tie("tie.yaml")._lc("en").dom["greeting"]["la"])
