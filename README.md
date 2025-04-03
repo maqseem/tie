@@ -2,4 +2,4 @@
 Lightweight internationalization library for Python.
 
 ### Installation
-pip install Tie
+pip install tie
