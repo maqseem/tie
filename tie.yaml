@@ -1,0 +1,28 @@
+tie:
+  version: 0.1.0
+  default_locale: en-US
+
+$greeting:
+    ru-RU: "Привет"
+    gr-GR: "Γεια"
+    en-US: "Hello"
+    fr-FR: "Bonjour"
+    ja: "こんにちは!"
+
++subscription:
+  $channel:
+    en: "my"
+    ru: "Essent Sight"
+    gr-GR: "TedX Talks"
+  request:
+    wrap: "👋 {greeting}! {}!"
+    ru-RU: "Подпишись на канал {channel}"
+    gr-GR: "Εγγραφείτε στο κανάλι {channel}"
+    en-US: "Subscribe to {channel} channel"
+    fr-FR: "S'il vous plaît, Abonnez-vous à la chaîne {channel}"
+    ja: "{channel}チャンネルに登録してください"
+
+  cancellation_confirmation:
+    wrap: "{}?"
+    en: "Are you sure you want to unsubscribe from {channel}"
+    de: "Sind Sie sicher, dass Sie sich vom {channel}-Kanal abmelden möchten"
