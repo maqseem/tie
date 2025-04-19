@@ -1,15 +1,16 @@
-from collections import defaultdict
 from packaging.version import Version
-from typing import Iterator, Sequence
+from typing import Iterator, Sequence, IO
 from typing_extensions import Self
 from yaml import SafeLoader, YAMLError
-from os import PathLike
+from pathlib import Path
+import inspect
+import os
 import re
 
 from .__version__ import VERSION as TIE_VERSION
 from .exceptions import InvalidLocaleError, VersionError
 
-FileDescriptorOrPath = str | int | PathLike
+FileDescriptorOrPath = int | os.PathLike | IO[str] | str
 Primitive = str | int | float | bool
 
 ISO_language_code_regex = re.compile("^[a-z]{2,3}(-[a-zA-Z]{2,8})*$")
@@ -20,29 +21,36 @@ class SafeDict(dict):
 
 class Tie:
     def __init__(self, 
-                 path: FileDescriptorOrPath, 
+                 path: FileDescriptorOrPath,
                  default_locale: str = "",
-                 merge_conflict: str = ""):
+                 merge_conflict: str = "",
+                 use_fallbacks: bool = True,
+                 panic_on_missing: bool = False):
         """
         Initializes a new Tie instance by loading a YAML file.
     
         Args:
             path (FileDescriptorOrPath): The path to the Tie YAML file.
-            merge_conflict (str): The strategy for merging conflicts (raise, override, or ignore).
             default_locale (Optional[str]): The default locale used for translations.
+            merge_conflict (str): The strategy for merging conflicts (raise, override, or ignore).
+            use_fallbacks (bool): Whether to use another locale in the absence of main and default locales.
+            panic_on_missing (bool): Whether to raise an exception when no translation is found.
 
         Raises:
             VersionError: If the required version exceeds the library version.
             FileNotFoundError: If the file cannot be found.
-            ValueError: If the YAML file is malformed.
+            ValueError: If the YAML file is malformed or the merging conflicts strategy does not exist.
             InvalidLocaleError: If the locale does not comply with supported standards.
         """
+
+        self._merge_conflict: str = merge_conflict
 
         self._is_section_mode: bool = True
         self._node: dict | Primitive = {}
         self._variables: dict = {}
-        self.merge_conflict: str = merge_conflict
         self._default_locale: str = default_locale
+
+        self._loaded_files = set()
 
         if path:
             self.load(path)
@@ -51,59 +59,110 @@ class Tie:
         for path in paths:
             if not self._is_section_mode:
                 raise TypeError("The file cannot be loaded into the non-section node")
+            resolved_path = path
+            if isinstance(path, (str, os.PathLike)):
+                try:
+                    caller_frame = inspect.stack()[-1]
+                    caller_dir = Path(os.path.dirname(os.path.abspath(caller_frame.filename)))
+                    resolved_path = caller_dir / path
+                except (IndexError, ValueError):
+                    resolved_path = Path.cwd() / path
 
-            try:
-                with open(path, "r") as file:
-                    content = SafeLoader(file).get_data() or {}
-            except FileNotFoundError as e:
-                raise FileNotFoundError(f"Tie file not found: {path}") from e
-            except YAMLError as e:
-                raise ValueError(f"Invalid YAML file") from e
+            self._load_yaml(resolved_path, target_node=self._node)
+        self._extract_variables()
 
-            config = content.get("tie", {})
-            content.pop("tie", None)
+    def _load_yaml(self, path: FileDescriptorOrPath, target_node: dict) -> None:
+        if path in self._loaded_files:
+            raise ValueError(f"Cyclic import detected: '{path}'")
 
-            parent_section: str = config.get("section")
-            if parent_section:
-                if not re.match("^[a-zA-Z0-9_.-]$", parent_section):
-                    raise ValueError(f"Invalid section name '{parent_section} in '{path}''")
-                for section in parent_section.split("."):
-                    content = {"+" + section: content}
-
-            self.merge_conflict = self.merge_conflict or config.get("merge_conflict", "override")
-            Tie._deep_merge(self._node, content, merge_conflict = self.merge_conflict)
-
-            self._default_locale: str = self._default_locale or config.get("default_locale", "en-US")
-            self.set_locale(inplace=True)
-
-            self._extract_variables()
-
-            self.version = config.get("version", TIE_VERSION)
-            if Version(self.version) > Version(TIE_VERSION):
-                raise VersionError(f"The required version exceeeds the library version: {self.version} > {TIE_VERSION}")
-
-    @staticmethod
-    def _deep_merge(dict1: dict, dict2: dict, merge_conflict: str):
-        if merge_conflict not in ("raise", "override", "ignore"):
-            raise ValueError(f"Unknown merge_conflict strategy: '{merge_conflict}'. " 
-                             "Expected 'raise', 'override', or 'ignore'")
-
-        for key, value in dict2.items():
-            if key in dict1 and isinstance(dict1[key], dict) and isinstance(value, dict):
-                Tie._deep_merge(dict1[key], value, merge_conflict = merge_conflict)
+        content: dict = {}
+        try:
+            if isinstance(path, int):
+                with os.fdopen(path, 'r') as file:
+                    content = SafeLoader(file).get_data()
+            elif hasattr(path, 'read'):
+                content = SafeLoader(file).get_data()
             else:
-                if key in dict1 and merge_conflict == "raise":
+                with open(path, 'r') as file:
+                    content = SafeLoader(file).get_data()
+
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"Tie file not found: {path}") from e
+        except YAMLError as e:
+            raise ValueError(f"Invalid YAML file") from e
+
+        config = content.get("tie", {})
+        content.pop("tie", None)
+
+        self.version = config.get("version", TIE_VERSION)
+        if Version(self.version) > Version(TIE_VERSION):
+            raise VersionError(f"The required version exceeeds the library version: {self.version} > {TIE_VERSION}")
+
+        parent_section: str = config.get("section")
+        if parent_section:
+            for section in parent_section.strip().split("."):
+                content = {"+" + section: content}
+
+        merge_conflict = self._merge_conflict or config.get("merge_conflict", "override")
+        if merge_conflict not in ("raise", "override", "ignore"):
+            raise ValueError(
+                f"Unknown merge_conflict strategy: '{merge_conflict}'. " 
+                f"Expected 'raise', 'override', or 'ignore'")
+        self._merge_conflict = merge_conflict
+
+        self._process_node(
+            target_node, 
+            content, 
+            current_path = path)
+
+        self._default_locale: str = self._default_locale or config.get("default_locale", "en-US")
+        self.set_locale(inplace=True)
+
+        self._loaded_files.add(path)
+
+    def _process_node(
+        self,
+        target_node: dict, 
+        current_node: dict, 
+        current_path: Path
+        ) -> None:
+
+        imports = current_node.pop("$import", [])
+        if imports and not isinstance(current_path, (str, os.PathLike)):
+            raise ValueError(
+                f"$import is not supported for file descriptors or streams in '{path}'. "
+                f"Use a file path to enable imports"
+            )
+
+        elif not (isinstance(imports, list) and all(isinstance(p, str) for p in imports)):
+            raise ValueError("Invalid $import format in '{current_path}', expected list of strings")
+        
+        for import_path in imports:
+            parent_path = (current_path if isinstance(current_path, Path) else Path(current_path)).parent
+
+            resolved_path = parent_path / import_path
+            if not resolved_path.exists():
+                raise FileNotFoundError(f"Imported file not found: '{resolved_path}'") 
+            self._load_yaml(resolved_path, current_node)
+
+        for key, value in current_node.items():  
+            if isinstance(value, dict):
+            # if key in target_node and isinstance(target_node[key], dict) and isinstance(value, dict):
+                target_node[key] = target_node.get(key, {})
+                self._process_node(target_node[key], value, current_path)
+            else:
+                if key in target_node and self._merge_conflict == "raise":
                     raise ValueError(f"Merge conflict occured: '{key}'")
-                elif key in dict1 and merge_conflict == "ignore":
+                elif key in target_node and self._merge_conflict == "ignore":
                     continue
-                dict1[key] = value
-        return dict1
+                target_node[key] = value
 
     def _extract_variables(self) -> None:
         """Extracts the $variables from the current node to use by default."""
-        for subnode, value in self._node.items():
+        for subnode, value in self._node.copy().items():
             if str(subnode).startswith("$"):
                 self._variables[subnode[1:]] = value
+                del self._node[subnode]
 
     def __getattr__(self, name: str, /) -> Self:
         """
@@ -131,8 +190,8 @@ class Tie:
         subnode = self.__copy__()
         subnode._is_section_mode = bool(section)
         subnode._node = section or text
-        if subnode._is_section_mode:
-            subnode._extract_variables()
+        subnode._extract_variables()
+
         return subnode
     
     def __getitem__(self, name: str, /) -> Self:
@@ -205,7 +264,7 @@ class Tie:
         return None
 
     @staticmethod
-    def _get_translation(node: dict, locales: Sequence[str]) -> str | None:
+    def _get_translation(node: dict | Primitive, locales: Sequence[str]) -> str | None:
         """
         Returns a translation for the highest-priority available locale.
 
@@ -217,6 +276,9 @@ class Tie:
             str | None: The translation string, None if no options for the requested locales are avaiable.
         
         """
+        if not isinstance(node, dict):
+            return node
+
         for locale in locales:
             if (match := Tie._get_best_locale_match(locale, list(node.keys()))):
                 return node.get(match)
@@ -246,6 +308,7 @@ class Tie:
 
         locales = (self._locale, self._default_locale)
         translation = Tie._get_translation(self._node, locales)
+
         if (wrap := self._node.get("wrap")):
             translation = re.sub(
                 "{ *}", "{wrap_text}", wrap
@@ -254,7 +317,12 @@ class Tie:
         for name, value in (lambda d: d.update(vars) or d)(self._variables.copy()).items():
             translation = re.sub(
                 "{ *" + name + " *}", 
-                str(Tie._get_translation(value, locales)), 
+                str(Tie._get_translation(
+                    self._variables[value[1:]] 
+                    if isinstance(value, str) and value.startswith("$") 
+                    else value, 
+                    locales
+                )), 
                 translation)
 
         return translation
@@ -315,7 +383,10 @@ class Tie:
         node._locale = locale
         return node
 
-    def render_tree(self, **vars: Primitive) -> dict[str, str | dict]:
+    def render_tree(self, 
+                    one_locale_only: bool = False, 
+                    **vars: Primitive
+                    ) -> dict[str, str | dict]:
         """
         Renders all the texts within every section,
         applying variable substitution (e.g, `"{age}"` -> `17`)
@@ -329,11 +400,14 @@ class Tie:
         """
         if self._is_section_mode:
             return {
-                clean_key: self[clean_key].render_tree(**vars)
+                clean_key: self[clean_key].render_tree(one_locale_only, **vars)
                 for key in self._node
                 if (clean_key := key.lstrip("+"))
             }
-        return {
-            key: str(self.set_locale(key)(**vars))
-            for key in self._node if ISO_language_code_regex.match(key)
-        }
+        elif one_locale_only:
+            return self(**vars)
+        else:
+            return {
+                key: str(self.set_locale(key)(**vars))
+                for key in self._node if ISO_language_code_regex.match(key)
+            }

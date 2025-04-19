@@ -1,0 +1,13 @@
+tie:
+  section: keyboard
+
+$placeholder:
+  ru: "заполнитель"
+  en: "placeholder"
+  gr: "κράτησης"
+
+press:
+  $button: $placeholder
+  en: "Press the button '{button}'"
+  ru: "Нажмите кнопку '{button}'"
+  gr: "Κάντε κλικ στο κουμπί '{button}'"
