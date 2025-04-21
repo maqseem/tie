@@ -1,5 +1,5 @@
 from packaging.version import Version
-from typing import Iterator, Sequence, IO
+from typing import Iterator, IO
 from typing_extensions import Self
 from yaml import SafeLoader, YAMLError
 from pathlib import Path
@@ -24,8 +24,8 @@ class Tie:
                  path: FileDescriptorOrPath,
                  default_locale: str = "",
                  merge_conflict: str = "",
-                 use_fallbacks: bool = True,
-                 panic_on_missing: bool = False):
+                 use_fallbacks: bool | None = None,
+                 panic_on_missing: bool | None = None):
         """
         Initializes a new Tie instance by loading a YAML file.
     
@@ -44,6 +44,11 @@ class Tie:
         """
 
         self._merge_conflict: str = merge_conflict
+        self._panic_on_missing: bool = panic_on_missing
+        self._use_fallbacks: bool = use_fallbacks
+
+        self.__constructor_panic_on_missing: bool | None = panic_on_missing
+        self.__constructor_use_fallbacks: bool | None = use_fallbacks
 
         self._is_section_mode: bool = True
         self._node: dict | Primitive = {}
@@ -85,7 +90,6 @@ class Tie:
             else:
                 with open(path, 'r') as file:
                     content = SafeLoader(file).get_data()
-
         except FileNotFoundError as e:
             raise FileNotFoundError(f"Tie file not found: {path}") from e
         except YAMLError as e:
@@ -108,12 +112,15 @@ class Tie:
             raise ValueError(
                 f"Unknown merge_conflict strategy: '{merge_conflict}'. " 
                 f"Expected 'raise', 'override', or 'ignore'")
-        self._merge_conflict = merge_conflict
 
         self._process_node(
             target_node, 
             content, 
             current_path = path)
+
+        self._merge_conflict = merge_conflict
+        self._use_fallbacks = self.__constructor_use_fallbacks or config.get("use_fallbacks", self._use_fallbacks)
+        self._panic_on_missing = self.__constructor_panic_on_missing or config.get("panic_on_missing", self._panic_on_missing)
 
         self._default_locale: str = self._default_locale or config.get("default_locale", "en-US")
         self.set_locale(inplace=True)
@@ -263,8 +270,10 @@ class Tie:
 
         return None
 
-    @staticmethod
-    def _get_translation(node: dict | Primitive, locales: Sequence[str]) -> str | None:
+    def _get_translation(
+        self,
+        node: dict | Primitive, 
+        ) -> str | None:
         """
         Returns a translation for the highest-priority available locale.
 
@@ -279,9 +288,15 @@ class Tie:
         if not isinstance(node, dict):
             return node
 
-        for locale in locales:
+        for locale in (self._locale, self._default_locale):
             if (match := Tie._get_best_locale_match(locale, list(node.keys()))):
                 return node.get(match)
+
+        if not self._use_fallbacks:
+            return
+        for locale, translation in node.items():
+            if ISO_language_code_regex.match(locale):
+                return translation
 
     def __call__(self, **vars: dict[str, Primitive]) -> str:
         """
@@ -299,7 +314,7 @@ class Tie:
 
         Raises:
             TypeError: If the current node is a section and thus cannot be rendered.
-            KeyError: If the current or the default locales are not present.
+            ValueError: If panicing on missing translation is enabled and translation is not present.
         """
         if self._is_section_mode:
             raise TypeError("The section cannot be rendered")
@@ -307,7 +322,11 @@ class Tie:
             return str(self._node)
 
         locales = (self._locale, self._default_locale)
-        translation = Tie._get_translation(self._node, locales)
+        translation = self._get_translation(self._node)
+
+        including_default = f" or '{self._default_locale}'"  if self._locale != self._default_locale else ""
+        if self._panic_on_missing and translation is None:
+            raise ValueError(f"Translation in '{self._locale}'{including_default} not found")
 
         if (wrap := self._node.get("wrap")):
             translation = re.sub(
@@ -315,15 +334,18 @@ class Tie:
                 ).format_map(SafeDict({"wrap_text": translation}))
 
         for name, value in (lambda d: d.update(vars) or d)(self._variables.copy()).items():
-            translation = re.sub(
-                "{ *" + name + " *}", 
-                str(Tie._get_translation(
+            var_translation = str(self._get_translation(
                     self._variables[value[1:]] 
                     if isinstance(value, str) and value.startswith("$") 
-                    else value, 
-                    locales
-                )), 
-                translation)
+                    else value,
+                )) 
+
+            if self._panic_on_missing and var_translation is None:
+                raise ValueError(f"Translation for '' in '{self._locale}'{including_default} not found")
+
+            translation = re.sub("{ *" + name + " *}", 
+                                var_translation,
+                                translation)
 
         return translation
 
